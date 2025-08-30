@@ -3,11 +3,17 @@ import java.util.*;
 public class BackgammonMinimax {
 
     // === Modelado de jugadores ===
+    // - sign: +1 (blancas) / -1 (negras) para codificar piezas en points[].
+    // - opponent(): devuelve el otro color.
+    // - dir(): dirección de avance en índices internos (blanco 23->0, negro 0->23).
+    // - homeStart()/homeEnd(): rango de la "casa" (los últimos 6 puntos).
+    // - inHome(): helper para saber si un índice está en la casa del jugador.
+    // - entryPoint(die): punto de entrada desde la barra según el dado.
 
     enum Player {
         WHITE(1, "BLANCO"), BLACK(-1, "NEGRO");
 
-        final int sign; // BLANCO: +, NEGRO: - para points[]
+        final int sign; // BLANCO: +1, NEGRO: -1 para points[]
         final String label;
 
         Player(int s, String l) {
@@ -20,14 +26,18 @@ public class BackgammonMinimax {
         }
 
         int dir() {
+            // Dirección de avance en términos de índice del array:
+            // BLANCO mueve de índices altos a bajos; NEGRO al revés.
             return this == WHITE ? -1 : +1;
         } // dirección de avance en índices
 
         int homeStart() {
+            // Inicio de la "casa" (los 6 puntos finales antes de salir)
             return this == WHITE ? 0 : 18;
         } // inicio del tablero interno (6 puntos)
 
         int homeEnd() {
+            // Fin de la "casa"
             return this == WHITE ? 5 : 23;
         } // fin (inclusive)
 
@@ -42,6 +52,12 @@ public class BackgammonMinimax {
     }
 
     // === Estado del juego ===
+    // GameState mantiene:
+    // - points[0..23]: # de fichas por punto (positivo = blancas, negativo =
+    // negras).
+    // - barWhite/barBlack: fichas en la barra.
+    // - offWhite/offBlack: fichas ya fuera (bear-off).
+
     static class GameState implements Cloneable {
         int[] points = new int[24]; // positivo = blancas, negativo = negras; abs = cantidad
         int barWhite = 0, barBlack = 0;
@@ -115,7 +131,8 @@ public class BackgammonMinimax {
         }
 
         int pipCount(Player p) {
-            // suma de distancia total a borne off
+            // Pip count = suma de distancias al OFF de todas tus fichas.
+            // Menos pips => más adelantado.
             int sum = 0;
             if (p == Player.WHITE) {
                 for (int i = 0; i < 24; i++)
@@ -160,10 +177,12 @@ public class BackgammonMinimax {
     }
 
     // === Movimientos ===
+    // Move = un paso simple (de un punto a otro) con un dado.
+    // MoveSeq = la secuencia completa de un turno (1..4 pasos si hay dobles).
     static class Move {
         // from: -1 => desde barra; to: -2 => bear off
         int from, to, die;
-        boolean hits;
+        boolean hits; // true si el destino era un blot rival (se lo envía a barra)
 
         Move(int from, int to, int die, boolean hits) {
             this.from = from;
@@ -204,6 +223,12 @@ public class BackgammonMinimax {
     }
 
     // === Generación de sucesores ===
+    // MoveGenerator produce TODAS las secuencias legales para un turno dado:
+    // - Explora ambos órdenes de los dados si no son dobles.
+    // - En dobles, permite hasta 4 pasos (siempre que sean legales).
+    // - Regla: se conservan sólo las secuencias que usan el MÁXIMO número de dados.
+    // - Dedup por estado final: no se listan caminos distintos que acaban igual.
+
     static class MoveGenerator {
         static List<MoveSeq> generateAll(GameState s, Player p, int[] dice) {
             // Expande con ambas órdenes si no es doble
@@ -413,6 +438,9 @@ public class BackgammonMinimax {
     }
 
     // === Heurística ===
+    // Función de evaluación del estado para la IA y el panel informativo.
+    // Valores positivos favorecen a BLANCAS; negativos favorecen a NEGRAS.
+
     static class Heuristic {
         static int evaluate(GameState s, Player pov) {
             // Cortes rápidos si alguien ya ganó (grandes constantes para priorizar mate)
@@ -420,10 +448,12 @@ public class BackgammonMinimax {
                 return 100000;
             if (s.off(pov.opponent()) >= 15)
                 return -100000;
+
+            // Pip score: menos pips = mejor. Se compara contra el rival.
             int myPips = s.pipCount(pov);
             int opPips = s.pipCount(pov.opponent());
             int pipScore = (opPips - myPips); // menos pips = mejor
-
+            // Otros componentes de la posición (pesos elegidos de forma heurística)
             int barPenalty = -25 * s.bar(pov) + 25 * s.bar(pov.opponent());
             int blotScore = -2 * s.blots(pov) + 2 * s.blots(pov.opponent());
             int primeScore = 3 * s.primes(pov) - 3 * s.primes(pov.opponent());
@@ -433,6 +463,11 @@ public class BackgammonMinimax {
     }
 
     // === Minimax profundidad 2 ===
+    // IA simple:
+    // - Considera todas las jugadas propias.
+    // - Supone que el rival tendrá la PEOR tirada posible para uno (entre 15 pares únicos).
+    // - Evalúa con la heurística y elige la que maximiza ese "peor caso".
+
     static class MinimaxAI {
         final Player me;
 
@@ -454,9 +489,10 @@ public class BackgammonMinimax {
         MoveSeq choose(GameState s, int[] myDice) {
             List<MoveSeq> myMoves = MoveGenerator.generateAll(s, me, normalizeDice(myDice));
             if (myMoves.isEmpty())
-                return new MoveSeq(); // pasar
+                return new MoveSeq(); // No hay jugadas: se pasa
             MoveSeq best = null;
             int bestVal = Integer.MIN_VALUE;
+            // Para cada jugada mía, calculo el peor "contraataque" posible del rival
             for (MoveSeq mseq : myMoves) {
                 GameState afterMine = applySeq(s, me, mseq);
                 int worstReply = Integer.MAX_VALUE;
@@ -547,7 +583,7 @@ public class BackgammonMinimax {
         System.out.println("Leyenda:  . = vacío | nW = n blancas | nB = n negras | Puntos: 24..1");
         System.out.println("===============================================");
 
-        // === Panel de estado ===
+        // === Panel de estado (resumen "quién va mejor" según heurística) ======
         int eval = Heuristic.evaluate(g, Player.WHITE); // evalúa desde la perspectiva de Blancas
         System.out.println("\n--- ESTADO DEL JUEGO ---");
         if (eval > 50) {
@@ -571,8 +607,11 @@ public class BackgammonMinimax {
 
     }
 
-    // Celda compacta y alineada a 3-4 caracteres.
-    // v>0 => nW (n blancas); v<0 => nB (n negras); 0 => "."
+    // Devuelve la celda formateada:
+    //  - " .": vacío
+    //  - "nW": n blancas
+    //  - "nB": n negras
+
     static String cell(int v) {
         if (v == 0)
             return " .";
@@ -587,6 +626,11 @@ public class BackgammonMinimax {
     }
 
     // === Loop principal ===
+    // - Pide color humano.
+    // - Empieza BLANCO (simplificación).
+    // - En cada turno: tirar dados, listar jugadas legales (max. dados), elegir por índice.
+    // - La IA responde y se imprime de nuevo el tablero y el panel.
+
     public static void main(String[] args) {
         Scanner sc = new Scanner(System.in);
         GameState g = GameState.initial();
@@ -607,6 +651,7 @@ public class BackgammonMinimax {
 
         while (!g.isTerminal()) {
             if (turn == human) {
+                // TURNO HUMANO ---------------------------------------------------
                 System.out.println("\nTu turno (" + human.label + "). Pulsa Enter para tirar dados...");
                 try {
                     System.in.read();
@@ -639,6 +684,7 @@ public class BackgammonMinimax {
                 printBoard(g);
                 turn = aiP;
             } else {
+                // TURNO IA ---------------------------------------------------
                 System.out.println("\nTurno IA (" + aiP.label + "). Tirando dados...");
                 int[] dice = roll();
                 System.out.println("IA obtuvo: " + dice[0] + "-" + dice[1]);
@@ -658,6 +704,7 @@ public class BackgammonMinimax {
             if (g.isTerminal())
                 break;
         }
+        //Anuncio del ganador
         Player w = g.winner();
         System.out.println("\nFIN DE LA PARTIDA — Gana: " + (w == null ? "(empate?)" : w.label));
     }
